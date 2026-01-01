@@ -12,6 +12,7 @@ import ProfileScreen from './screens/ProfileScreen';
 import SampleDataScreen from './screens/SampleDataScreen';
 import OnboardingSwipeScreen from './screens/OnboardingSwipeScreen';
 import DailySwipeScreen from './screens/DailySwipeScreen';
+import TermsScreen from './screens/TermsScreen';
 
 const Stack = createStackNavigator();
 
@@ -87,6 +88,13 @@ function HomeScreen({ navigation }: any) {
         >
           <Text style={styles.menuButtonText}>🧪 サンプルデータ管理</Text>
         </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.menuButton, styles.termsButton]}
+          onPress={() => navigation.navigate('Terms')}
+        >
+          <Text style={styles.menuButtonText}>📄 利用規約・プライバシーポリシー</Text>
+        </TouchableOpacity>
       </View>
 
       <StatusBar style="auto" />
@@ -107,43 +115,126 @@ export default function App() {
 
       // ユーザーがログインしている場合、onboarding状態と日次評価状態を確認
       if (session?.user) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('onboarding_completed, last_daily_swipe_date')
-          .eq('id', session.user.id)
-          .single();
+        try {
+          const { data: profile, error } = await supabase
+            .from('profiles')
+            .select('onboarding_completed, last_daily_swipe_date, deleted_at')
+            .eq('id', session.user.id)
+            .maybeSingle();
 
-        setOnboardingCompleted(profile?.onboarding_completed ?? false);
+          if (error) {
+            // データベースエラーの場合
+            console.error('Profile fetch error:', error);
+            setOnboardingCompleted(true);
+            setNeedsDailySwipe(false);
+          } else if (!profile) {
+            // プロフィールがまだ作成されていない場合
+            console.log('Profile not found, using default values');
+            setOnboardingCompleted(false);
+            setNeedsDailySwipe(false);
+          } else if (profile.deleted_at) {
+            // アカウントが削除済みの場合はサインアウト
+            console.log('Account is deleted, signing out');
+            await supabase.auth.signOut();
+            setOnboardingCompleted(true);
+            setNeedsDailySwipe(false);
+          } else {
+            setOnboardingCompleted(profile?.onboarding_completed ?? false);
 
-        // 今日の日付と最後の日次評価日を比較
-        const today = new Date().toISOString().split('T')[0];
-        const lastSwipeDate = profile?.last_daily_swipe_date;
-        setNeedsDailySwipe(profile?.onboarding_completed && lastSwipeDate !== today);
+            // 今日の日付と最後の日次評価日を比較
+            const today = new Date().toISOString().split('T')[0];
+            const lastSwipeDate = profile?.last_daily_swipe_date;
+            setNeedsDailySwipe(profile?.onboarding_completed && lastSwipeDate !== today);
+          }
+        } catch (err) {
+          console.error('Profile initialization error:', err);
+          setOnboardingCompleted(true);
+          setNeedsDailySwipe(false);
+        }
       }
 
+      setIsReady(true);
+    }).catch((error) => {
+      console.error('Session initialization error:', error);
       setIsReady(true);
     });
 
     // 認証状態の変更を監視
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
+      async (event, session) => {
+        console.log('Auth state change event:', event, 'User ID:', session?.user?.id);
         setUser(session?.user ?? null);
 
         // ログイン時にonboarding状態と日次評価状態を確認
         if (session?.user) {
-          const { data: profile } = await supabase
-            .from('profiles')
-            .select('onboarding_completed, last_daily_swipe_date')
-            .eq('id', session.user.id)
-            .single();
+          try {
+            const { data: profile, error } = await supabase
+              .from('profiles')
+              .select('onboarding_completed, last_daily_swipe_date, deleted_at')
+              .eq('id', session.user.id)
+              .maybeSingle();
 
-          setOnboardingCompleted(profile?.onboarding_completed ?? false);
+            console.log('Profile fetch result:', { profile, error });
 
-          // 今日の日付と最後の日次評価日を比較
-          const today = new Date().toISOString().split('T')[0];
-          const lastSwipeDate = profile?.last_daily_swipe_date;
-          setNeedsDailySwipe(profile?.onboarding_completed && lastSwipeDate !== today);
+            if (error) {
+              // データベースエラーの場合
+              console.error('Profile fetch error on auth change:', error);
+              setOnboardingCompleted(true);
+              setNeedsDailySwipe(false);
+            } else if (!profile) {
+              // プロフィールが存在しない場合（新規ユーザー、まだトリガーが実行されていない）
+              console.log('Profile not found yet, waiting for trigger to create profile');
+              // 少し待ってから再度取得を試みる
+              setTimeout(async () => {
+                console.log('Retrying profile fetch after 1 second...');
+                const { data: retryProfile, error: retryError } = await supabase
+                  .from('profiles')
+                  .select('onboarding_completed, last_daily_swipe_date, deleted_at')
+                  .eq('id', session.user.id)
+                  .maybeSingle();
+
+                console.log('Retry profile fetch result:', { retryProfile, retryError });
+
+                if (retryProfile && !retryProfile.deleted_at) {
+                  console.log('Setting onboarding_completed to:', retryProfile.onboarding_completed);
+                  setOnboardingCompleted(retryProfile?.onboarding_completed ?? false);
+                  const today = new Date().toISOString().split('T')[0];
+                  const lastSwipeDate = retryProfile?.last_daily_swipe_date;
+                  setNeedsDailySwipe(retryProfile?.onboarding_completed && lastSwipeDate !== today);
+                } else {
+                  // それでもプロフィールがない場合はデフォルト値
+                  console.log('Profile still not found, setting onboarding_completed to false');
+                  setOnboardingCompleted(false);
+                  setNeedsDailySwipe(false);
+                }
+              }, 1000);
+
+              // 初期値を設定
+              console.log('Setting initial onboarding_completed to false');
+              setOnboardingCompleted(false);
+              setNeedsDailySwipe(false);
+            } else if (profile.deleted_at) {
+              // アカウントが削除済みの場合はサインアウト
+              console.log('Account is deleted on auth change, signing out');
+              await supabase.auth.signOut();
+              setOnboardingCompleted(true);
+              setNeedsDailySwipe(false);
+            } else {
+              console.log('Profile found, onboarding_completed:', profile.onboarding_completed);
+              setOnboardingCompleted(profile?.onboarding_completed ?? false);
+
+              // 今日の日付と最後の日次評価日を比較
+              const today = new Date().toISOString().split('T')[0];
+              const lastSwipeDate = profile?.last_daily_swipe_date;
+              setNeedsDailySwipe(profile?.onboarding_completed && lastSwipeDate !== today);
+            }
+          } catch (err) {
+            console.error('Profile fetch exception on auth change:', err);
+            setOnboardingCompleted(true);
+            setNeedsDailySwipe(false);
+          }
         } else {
+          console.log('No user session, setting onboarding_completed to true');
           setOnboardingCompleted(true);
           setNeedsDailySwipe(false);
         }
@@ -165,12 +256,19 @@ export default function App() {
     <NavigationContainer>
       <Stack.Navigator>
         {!user ? (
-          // ログインしていない場合は認証画面のみ
-          <Stack.Screen
-            name="Auth"
-            component={AuthScreen}
-            options={{ headerShown: false }}
-          />
+          // ログインしていない場合は認証画面と利用規約画面
+          <>
+            <Stack.Screen
+              name="Auth"
+              component={AuthScreen}
+              options={{ headerShown: false }}
+            />
+            <Stack.Screen
+              name="Terms"
+              component={TermsScreen}
+              options={{ headerShown: false }}
+            />
+          </>
         ) : !onboardingCompleted ? (
           // 新規ユーザー: 10枚の初回評価が必要
           <>
@@ -208,6 +306,11 @@ export default function App() {
               name="SampleData"
               component={SampleDataScreen}
               options={{ title: 'サンプルデータ管理' }}
+            />
+            <Stack.Screen
+              name="Terms"
+              component={TermsScreen}
+              options={{ headerShown: false }}
             />
           </>
         ) : needsDailySwipe ? (
@@ -248,6 +351,11 @@ export default function App() {
               component={SampleDataScreen}
               options={{ title: 'サンプルデータ管理' }}
             />
+            <Stack.Screen
+              name="Terms"
+              component={TermsScreen}
+              options={{ headerShown: false }}
+            />
           </>
         ) : (
           // 日次評価完了済み: 通常のアプリ画面
@@ -281,6 +389,11 @@ export default function App() {
               name="SampleData"
               component={SampleDataScreen}
               options={{ title: 'サンプルデータ管理' }}
+            />
+            <Stack.Screen
+              name="Terms"
+              component={TermsScreen}
+              options={{ headerShown: false }}
             />
           </>
         )}

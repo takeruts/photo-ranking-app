@@ -5,29 +5,26 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  Alert,
   KeyboardAvoidingView,
   Platform,
+  ScrollView,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
-
-// Web対応のアラート関数
-function showAlert(title: string, message: string) {
-  if (Platform.OS === 'web') {
-    window.alert(`${title}\n${message}`);
-  } else {
-    Alert.alert(title, message);
-  }
-}
+import { useNavigation } from '@react-navigation/native';
 
 export default function AuthScreen() {
+  const navigation = useNavigation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordConfirm, setPasswordConfirm] = useState('');
   const [username, setUsername] = useState('');
   const [gender, setGender] = useState<'male' | 'female' | ''>('');
   const [isSignUp, setIsSignUp] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showPasswordConfirm, setShowPasswordConfirm] = useState(false);
 
   async function handleAuth() {
     setError('');
@@ -37,8 +34,18 @@ export default function AuthScreen() {
       return;
     }
 
+    if (isSignUp && password !== passwordConfirm) {
+      setError('パスワードが一致しません');
+      return;
+    }
+
     if (isSignUp && !gender) {
       setError('性別を選択してください');
+      return;
+    }
+
+    if (isSignUp && !agreedToTerms) {
+      setError('利用規約とプライバシーポリシーに同意してください');
       return;
     }
 
@@ -58,9 +65,89 @@ export default function AuthScreen() {
           }
         });
 
+        // ユーザーが既に存在する場合、削除済みプロフィールをチェック
+        if (error && error.message.includes('User already registered')) {
+          // 既存のユーザーでサインインを試みる
+          const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+            email,
+            password,
+          });
+
+          if (signInError) {
+            // パスワードが違う場合
+            setError('このメールアドレスは既に登録されています。パスワードが異なる場合はログインしてください。');
+            return;
+          }
+
+          // サインイン成功、削除済みプロフィールをチェック
+          if (signInData.user) {
+            const { data: profile } = await supabase
+              .from('profiles')
+              .select('deleted_at')
+              .eq('id', signInData.user.id)
+              .maybeSingle();
+
+            if (!profile) {
+              // プロフィールが存在しない場合は新規作成
+              const { error: createError } = await (supabase as any)
+                .from('profiles')
+                .insert({
+                  id: signInData.user.id,
+                  username: username || email.split('@')[0],
+                  gender: gender,
+                  onboarding_completed: false,
+                  created_at: new Date().toISOString(),
+                });
+
+              if (createError) throw createError;
+
+              // プロフィール作成後、認証状態を再取得してonboarding画面に遷移
+              // 一度サインアウトして再サインインすることで、onAuthStateChangeを発火させる
+              console.log('Profile created, re-authenticating to trigger onboarding...');
+              await supabase.auth.signOut();
+              const { error: reSignInError } = await supabase.auth.signInWithPassword({ email, password });
+              if (reSignInError) {
+                console.error('Re-sign in error:', reSignInError);
+                throw reSignInError;
+              }
+              console.log('Re-authenticated successfully');
+              return;
+            } else if ((profile as any).deleted_at) {
+              // 削除済みプロフィールを復元
+              const { error: restoreError } = await (supabase as any)
+                .from('profiles')
+                .update({
+                  deleted_at: null,
+                  username: username || email.split('@')[0],
+                  gender: gender,
+                  onboarding_completed: false,
+                })
+                .eq('id', signInData.user.id);
+
+              if (restoreError) throw restoreError;
+
+              // プロフィール復元後、認証状態を再取得してonboarding画面に遷移
+              // 一度サインアウトして再サインインすることで、onAuthStateChangeを発火させる
+              console.log('Profile restored, re-authenticating to trigger onboarding...');
+              await supabase.auth.signOut();
+              const { error: reSignInError } = await supabase.auth.signInWithPassword({ email, password });
+              if (reSignInError) {
+                console.error('Re-sign in error:', reSignInError);
+                throw reSignInError;
+              }
+              console.log('Re-authenticated successfully');
+              return;
+            }
+          }
+
+          // 削除済みでない場合は通常のエラーメッセージ
+          setError('このメールアドレスは既に登録されています');
+          return;
+        }
+
         if (error) throw error;
 
-        showAlert('成功', 'アカウントが作成されました');
+        // アカウント作成成功 - 認証状態の変更によりonboarding画面に自動遷移
       } else {
         // サインイン
         const { error } = await supabase.auth.signInWithPassword({
@@ -83,109 +170,166 @@ export default function AuthScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       style={styles.container}
     >
-      <View style={styles.formContainer}>
-        <Text style={styles.title}>Photo Ranking</Text>
-        <Text style={styles.subtitle}>
-          {isSignUp ? 'アカウント作成' : 'ログイン'}
-        </Text>
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={styles.formContainer}>
+          <Text style={styles.title}>Photo Ranking</Text>
+          <Text style={styles.subtitle}>
+            {isSignUp ? 'アカウント作成' : 'ログイン'}
+          </Text>
 
-        {error ? (
-          <View style={styles.errorContainer}>
-            <Text style={styles.errorText}>{error}</Text>
-          </View>
-        ) : null}
+          {error ? (
+            <View style={styles.errorContainer}>
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          ) : null}
 
-        {isSignUp && (
-          <>
+          {isSignUp && (
+            <>
+              <TextInput
+                style={styles.input}
+                placeholder="ユーザー名"
+                value={username}
+                onChangeText={setUsername}
+                autoCapitalize="none"
+              />
+
+              <Text style={styles.label}>性別</Text>
+              <View style={styles.genderContainer}>
+                <TouchableOpacity
+                  style={[
+                    styles.genderButton,
+                    gender === 'male' && styles.genderButtonSelected,
+                  ]}
+                  onPress={() => setGender('male')}
+                >
+                  <Text
+                    style={[
+                      styles.genderButtonText,
+                      gender === 'male' && styles.genderButtonTextSelected,
+                    ]}
+                  >
+                    男性
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.genderButton,
+                    gender === 'female' && styles.genderButtonSelected,
+                  ]}
+                  onPress={() => setGender('female')}
+                >
+                  <Text
+                    style={[
+                      styles.genderButtonText,
+                      gender === 'female' && styles.genderButtonTextSelected,
+                    ]}
+                  >
+                    女性
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.termsContainer}>
+                <TouchableOpacity
+                  style={styles.checkboxTouchable}
+                  onPress={() => setAgreedToTerms(!agreedToTerms)}
+                >
+                  <View style={[styles.checkbox, agreedToTerms && styles.checkboxChecked]}>
+                    {agreedToTerms && <Text style={styles.checkmark}>✓</Text>}
+                  </View>
+                </TouchableOpacity>
+                <View style={styles.termsTextContainer}>
+                  <Text style={styles.termsText}>
+                    以下に同意します：{'\n'}
+                    • アップロードした写真が他のユーザーに公開されること{'\n'}
+                    • 写真がランキングシステムで評価されること{'\n'}
+                    •{' '}
+                  </Text>
+                  <TouchableOpacity onPress={() => (navigation as any).navigate('Terms')}>
+                    <Text style={styles.termsLink}>利用規約とプライバシーポリシー</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </>
+          )}
+
+          <TextInput
+            style={styles.input}
+            placeholder="メールアドレス"
+            value={email}
+            onChangeText={setEmail}
+            autoCapitalize="none"
+            keyboardType="email-address"
+          />
+
+          <View style={styles.passwordContainer}>
             <TextInput
-              style={styles.input}
-              placeholder="ユーザー名"
-              value={username}
-              onChangeText={setUsername}
-              autoCapitalize="none"
+              style={styles.passwordInput}
+              placeholder="パスワード"
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry={!showPassword}
             />
+            <TouchableOpacity
+              style={styles.passwordToggle}
+              onPress={() => setShowPassword(!showPassword)}
+            >
+              <Text style={styles.passwordToggleText}>
+                {showPassword ? '🙈' : '👁️'}
+              </Text>
+            </TouchableOpacity>
+          </View>
 
-            <Text style={styles.label}>性別</Text>
-            <View style={styles.genderContainer}>
+          {isSignUp && (
+            <View style={styles.passwordContainer}>
+              <TextInput
+                style={styles.passwordInput}
+                placeholder="パスワード（確認）"
+                value={passwordConfirm}
+                onChangeText={setPasswordConfirm}
+                secureTextEntry={!showPasswordConfirm}
+              />
               <TouchableOpacity
-                style={[
-                  styles.genderButton,
-                  gender === 'male' && styles.genderButtonSelected,
-                ]}
-                onPress={() => setGender('male')}
+                style={styles.passwordToggle}
+                onPress={() => setShowPasswordConfirm(!showPasswordConfirm)}
               >
-                <Text
-                  style={[
-                    styles.genderButtonText,
-                    gender === 'male' && styles.genderButtonTextSelected,
-                  ]}
-                >
-                  男性
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.genderButton,
-                  gender === 'female' && styles.genderButtonSelected,
-                ]}
-                onPress={() => setGender('female')}
-              >
-                <Text
-                  style={[
-                    styles.genderButtonText,
-                    gender === 'female' && styles.genderButtonTextSelected,
-                  ]}
-                >
-                  女性
+                <Text style={styles.passwordToggleText}>
+                  {showPasswordConfirm ? '🙈' : '👁️'}
                 </Text>
               </TouchableOpacity>
             </View>
-          </>
-        )}
+          )}
 
-        <TextInput
-          style={styles.input}
-          placeholder="メールアドレス"
-          value={email}
-          onChangeText={setEmail}
-          autoCapitalize="none"
-          keyboardType="email-address"
-        />
+          <TouchableOpacity
+            style={[styles.button, loading && styles.buttonDisabled]}
+            onPress={handleAuth}
+            disabled={loading}
+          >
+            <Text style={styles.buttonText}>
+              {loading
+                ? '処理中...'
+                : isSignUp
+                ? 'アカウント作成'
+                : 'ログイン'}
+            </Text>
+          </TouchableOpacity>
 
-        <TextInput
-          style={styles.input}
-          placeholder="パスワード"
-          value={password}
-          onChangeText={setPassword}
-          secureTextEntry
-        />
-
-        <TouchableOpacity
-          style={[styles.button, loading && styles.buttonDisabled]}
-          onPress={handleAuth}
-          disabled={loading}
-        >
-          <Text style={styles.buttonText}>
-            {loading
-              ? '処理中...'
-              : isSignUp
-              ? 'アカウント作成'
-              : 'ログイン'}
-          </Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.switchButton}
-          onPress={() => setIsSignUp(!isSignUp)}
-        >
-          <Text style={styles.switchButtonText}>
-            {isSignUp
-              ? '既にアカウントをお持ちの方はこちら'
-              : 'アカウントをお持ちでない方はこちら'}
-          </Text>
-        </TouchableOpacity>
-      </View>
+          <TouchableOpacity
+            style={styles.switchButton}
+            onPress={() => setIsSignUp(!isSignUp)}
+          >
+            <Text style={styles.switchButtonText}>
+              {isSignUp
+                ? '既にアカウントをお持ちの方はこちら'
+                : 'アカウントをお持ちでない方はこちら'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 }
@@ -195,9 +339,11 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f5f5f5',
   },
-  formContainer: {
-    flex: 1,
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'center',
+  },
+  formContainer: {
     padding: 20,
   },
   title: {
@@ -240,6 +386,28 @@ const styles = StyleSheet.create({
     fontSize: 16,
     borderWidth: 1,
     borderColor: '#ddd',
+  },
+  passwordContainer: {
+    position: 'relative',
+    marginBottom: 15,
+  },
+  passwordInput: {
+    backgroundColor: '#fff',
+    padding: 15,
+    paddingRight: 50,
+    borderRadius: 10,
+    fontSize: 16,
+    borderWidth: 1,
+    borderColor: '#ddd',
+  },
+  passwordToggle: {
+    position: 'absolute',
+    right: 15,
+    top: 15,
+    padding: 5,
+  },
+  passwordToggleText: {
+    fontSize: 20,
   },
   genderContainer: {
     flexDirection: 'row',
@@ -290,5 +458,55 @@ const styles = StyleSheet.create({
   switchButtonText: {
     color: '#007AFF',
     fontSize: 14,
+  },
+  termsContainer: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 20,
+    marginTop: 10,
+    padding: 15,
+    backgroundColor: '#F0F8FF',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#007AFF',
+  },
+  checkboxTouchable: {
+    marginRight: 12,
+  },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: '#007AFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+  },
+  checkboxChecked: {
+    backgroundColor: '#007AFF',
+  },
+  checkmark: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  termsTextContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'flex-start',
+  },
+  termsText: {
+    fontSize: 13,
+    color: '#333',
+    lineHeight: 20,
+  },
+  termsLink: {
+    fontSize: 13,
+    color: '#007AFF',
+    lineHeight: 20,
+    textDecorationLine: 'underline',
+    fontWeight: '600',
   },
 });

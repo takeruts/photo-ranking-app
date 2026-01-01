@@ -11,10 +11,12 @@ import {
   RefreshControl,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../lib/supabase';
 import { INITIAL_RATING } from '../lib/elo';
 import { Photo } from '../types/database';
+import { validateRealPhoto } from '../lib/imageValidator';
 
 // Web対応のアラート関数
 function showAlert(title: string, message: string) {
@@ -98,9 +100,8 @@ export default function UploadScreen() {
 
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
-      allowsEditing: true,
-      aspect: [4, 3],
-      quality: 0.8,
+      allowsEditing: false, // スマホの縦横比を保持
+      quality: 1, // 最高品質で取得（後でリサイズ）
     });
 
     if (result.canceled || !result.assets[0]) {
@@ -124,14 +125,44 @@ export default function UploadScreen() {
         .from('profiles')
         .select('gender')
         .eq('id', user.id)
-        .single();
+        .maybeSingle();
 
-      if (profileError || !profileData?.gender) {
+      if (profileError) {
+        showAlert('エラー', `プロフィール取得エラー: ${profileError.message}`);
+        return;
+      }
+
+      if (!profileData || !(profileData as any).gender) {
         showAlert('エラー', 'プロフィールに性別が設定されていません。プロフィール編集で性別を設定してください。');
         return;
       }
 
-      const imageUri = result.assets[0].uri;
+      let imageUri = result.assets[0].uri;
+
+      // スマホ写真のサイズに最適化（最大1920px幅）
+      const manipResult = await ImageManipulator.manipulateAsync(imageUri, [
+        { resize: { width: 1920 } }, // 幅を1920pxに制限（高さは自動調整）
+      ], {
+        compress: 0.8, // JPEG圧縮率80%
+        format: ImageManipulator.SaveFormat.JPEG,
+      });
+
+      imageUri = manipResult.uri;
+
+      // 画像の検証（実写の人物写真かチェック）
+      try {
+        const validationResult = await validateRealPhoto(imageUri);
+
+        if (!validationResult.isValid) {
+          showAlert('アップロード不可', validationResult.reason || '画像の検証に失敗しました');
+          return;
+        }
+      } catch (validationError: any) {
+        console.error('Validation error:', validationError);
+        showAlert('検証エラー', '画像の検証中にエラーが発生しました。もう一度お試しください。');
+        return;
+      }
+
       const filePath = `${user.id}/${Date.now()}.jpg`;
 
       let uploadData: Blob | Uint8Array;
@@ -170,11 +201,11 @@ export default function UploadScreen() {
       } = supabase.storage.from('photos').getPublicUrl(filePath);
 
       // データベースに保存（性別を含める）
-      const { error: dbError } = await supabase.from('photos').insert({
+      const { error: dbError } = await (supabase as any).from('photos').insert({
         user_id: user.id,
         image_url: publicUrl,
         rating: INITIAL_RATING,
-        gender: profileData.gender,
+        gender: (profileData as any).gender,
       });
 
       if (dbError) throw dbError;

@@ -14,6 +14,7 @@ import { supabase } from '../lib/supabase';
 export default function ProfileScreen({ navigation }: any) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [username, setUsername] = useState('');
   const [gender, setGender] = useState<'male' | 'female' | ''>('');
   const [email, setEmail] = useState('');
@@ -92,6 +93,99 @@ export default function ProfileScreen({ navigation }: any) {
       Alert.alert('エラー', error.message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function deleteAccount() {
+    Alert.alert(
+      'アカウント削除の確認',
+      'アカウントを削除すると、すべてのデータと写真が完全に削除されます。この操作は取り消せません。本当に削除しますか？',
+      [
+        {
+          text: 'キャンセル',
+          style: 'cancel',
+        },
+        {
+          text: '削除する',
+          style: 'destructive',
+          onPress: () => confirmDeleteAccount(),
+        },
+      ]
+    );
+  }
+
+  async function confirmDeleteAccount() {
+    setDeleting(true);
+
+    try {
+      // 1. ユーザーの写真を取得
+      const { data: photos, error: photosError } = await supabase
+        .from('photos')
+        .select('id, image_url')
+        .eq('user_id', userId);
+
+      if (photosError) throw photosError;
+
+      // 2. ストレージから写真を削除
+      if (photos && photos.length > 0) {
+        const filePaths = photos.map((photo) => {
+          const url = photo.image_url;
+          const match = url.match(/\/photos\/(.+)$/);
+          return match ? match[1] : null;
+        }).filter(Boolean) as string[];
+
+        if (filePaths.length > 0) {
+          const { error: storageError } = await supabase.storage
+            .from('photos')
+            .remove(filePaths);
+
+          if (storageError) {
+            console.error('Storage deletion error:', storageError);
+          }
+        }
+      }
+
+      // 3. データベースから写真を削除
+      const { error: photosDeleteError } = await supabase
+        .from('photos')
+        .delete()
+        .eq('user_id', userId);
+
+      if (photosDeleteError) throw photosDeleteError;
+
+      // 4. 評価履歴を削除
+      const { error: swipesDeleteError } = await supabase
+        .from('swipes')
+        .delete()
+        .eq('voter_id', userId);
+
+      if (swipesDeleteError) throw swipesDeleteError;
+
+      // 5. プロフィールを論理削除（deleted_atを設定）
+      const { error: profileDeleteError } = await supabase
+        .from('profiles')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', userId);
+
+      if (profileDeleteError) throw profileDeleteError;
+
+      // 6. サインアウト
+      await supabase.auth.signOut();
+
+      Alert.alert(
+        '完了',
+        'アカウントが削除されました。\n\nすべての写真、評価履歴、プロフィール情報が削除され、ログアウトされました。',
+        [
+          {
+            text: 'OK',
+          },
+        ]
+      );
+    } catch (error: any) {
+      console.error('Account deletion error:', error);
+      Alert.alert('エラー', `アカウント削除中にエラーが発生しました: ${error.message}`);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -177,6 +271,23 @@ export default function ProfileScreen({ navigation }: any) {
         >
           <Text style={styles.cancelButtonText}>キャンセル</Text>
         </TouchableOpacity>
+
+        <View style={styles.dangerZone}>
+          <Text style={styles.dangerZoneTitle}>危険な操作</Text>
+          <TouchableOpacity
+            style={[styles.deleteButton, deleting && styles.buttonDisabled]}
+            onPress={deleteAccount}
+            disabled={deleting}
+          >
+            <Text style={styles.deleteButtonText}>
+              {deleting ? '削除中...' : 'アカウントを削除'}
+            </Text>
+          </TouchableOpacity>
+          <Text style={styles.deleteWarning}>
+            削除すると、すべてのデータと写真が完全に削除されます。{'\n'}
+            この操作は取り消せません。
+          </Text>
+        </View>
       </View>
     </ScrollView>
   );
@@ -294,5 +405,36 @@ const styles = StyleSheet.create({
     color: '#666',
     fontSize: 16,
     fontWeight: '600',
+  },
+  dangerZone: {
+    marginTop: 50,
+    paddingTop: 30,
+    borderTopWidth: 2,
+    borderTopColor: '#FFEBEE',
+  },
+  dangerZoneTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#D32F2F',
+    marginBottom: 15,
+  },
+  deleteButton: {
+    backgroundColor: '#F44336',
+    padding: 15,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  deleteButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  deleteWarning: {
+    fontSize: 13,
+    color: '#999',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginTop: 5,
   },
 });

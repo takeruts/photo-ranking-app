@@ -1,0 +1,5 @@
+# Supabase Configuration File
+
+[functions]
+  [functions.validate-image]
+    verify_jwt = false
